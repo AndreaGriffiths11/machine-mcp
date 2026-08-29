@@ -15,17 +15,20 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from mcp.server.mcpserver import MCPServer
 
 from machine_mcp.sandbox import SandboxError, resolve_in_workspace
 
 READ_FILE_MAX_BYTES = 1_000_000
+RUN_OUTPUT_MAX_BYTES = 1_000_000
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
 DEFAULT_WORKSPACE = Path.home() / "machine-mcp-workspace"
@@ -72,6 +75,40 @@ def _which(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def _read_process_output(stream: BinaryIO) -> tuple[str, bool]:
+    stream.seek(0)
+    data = stream.read(RUN_OUTPUT_MAX_BYTES + 1)
+    truncated = len(data) > RUN_OUTPUT_MAX_BYTES
+    text = data[:RUN_OUTPUT_MAX_BYTES].decode("utf-8", "replace")
+    return redact_secrets(text), truncated
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+    elif os.name == "nt":
+        completed = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0 and process.poll() is None:
+            process.kill()
+    else:
+        process.kill()
+
+    process.wait()
+
+
 def build_status(workspace: Path | None = None) -> dict[str, Any]:
     """Machine status. No secrets, no home listing."""
     ws = workspace if workspace is not None else get_workspace()
@@ -112,6 +149,9 @@ def run(command: str, timeout_seconds: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
     Args:
         command: Program and arguments as a single string. Split with shlex on POSIX.
         timeout_seconds: Kill after this many seconds. Default 30, max 120.
+
+    Output is limited to 1MB each for stdout and stderr. A nonzero exit code
+    returns ok=false.
     """
     if command is None or not str(command).strip():
         return {"ok": False, "error": "command is empty"}
@@ -132,44 +172,66 @@ def run(command: str, timeout_seconds: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
         return {"ok": False, "error": "command is empty"}
 
     workspace = get_workspace()
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            shell=False,
-        )
-    except FileNotFoundError:
-        return {
-            "ok": False,
-            "error": f"executable not found: {argv[0]}",
-            "exit_code": None,
-        }
-    except subprocess.TimeoutExpired as exc:
-        stdout = redact_secrets(exc.stdout or "") if isinstance(exc.stdout, str) else redact_secrets((exc.stdout or b"").decode("utf-8", "replace"))
-        stderr = redact_secrets(exc.stderr or "") if isinstance(exc.stderr, str) else redact_secrets((exc.stderr or b"").decode("utf-8", "replace"))
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        popen_options: dict[str, Any] = {}
+        if os.name == "posix":
+            popen_options["start_new_session"] = True
+        elif os.name == "nt":
+            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=workspace,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                shell=False,
+                **popen_options,
+            )
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "error": f"executable not found: {argv[0]}",
+                "exit_code": None,
+            }
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "exit_code": None}
+
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process_tree(process)
+
+        stdout, stdout_truncated = _read_process_output(stdout_file)
+        stderr, stderr_truncated = _read_process_output(stderr_file)
+
+    if timed_out:
         return {
             "ok": False,
             "error": f"timed out after {timeout}s",
             "stdout": stdout,
             "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
             "exit_code": None,
             "timed_out": True,
         }
-    except OSError as exc:
-        return {"ok": False, "error": str(exc), "exit_code": None}
 
-    return {
-        "ok": True,
-        "stdout": redact_secrets(completed.stdout or ""),
-        "stderr": redact_secrets(completed.stderr or ""),
-        "exit_code": completed.returncode,
+    ok = process.returncode == 0
+    result = {
+        "ok": ok,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "exit_code": process.returncode,
         "timed_out": False,
     }
+    if not ok:
+        result["error"] = f"command exited with code {process.returncode}"
+    return result
 
 
 @mcp.tool()
@@ -182,6 +244,19 @@ def record_terminal(script: str) -> dict[str, Any]:
     """
     if script is None or not str(script).strip():
         return {"ok": False, "error": "script is empty"}
+
+    system = platform.system()
+    if system != "Linux":
+        return {
+            "ok": False,
+            "error": f"terminal recording is not implemented on {system}",
+            "detail": (
+                "machine-mcp will not suggest a Linux capture command on this host "
+                "or claim that it wrote a video."
+            ),
+            "platform": system,
+            "script_length": len(script),
+        }
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -203,7 +278,7 @@ def record_terminal(script: str) -> dict[str, Any]:
             "Run the suggested ffmpeg command yourself on Linux if you need a capture."
         ),
         "suggested_command": suggested,
-        "platform": platform.system(),
+        "platform": system,
         "script_length": len(script),
     }
 

@@ -70,8 +70,8 @@ Optional env:
 | Tool | What it does |
 | --- | --- |
 | `status` | OS, hostname, cwd, Python version, whether `copilot` / `ffmpeg` / `git` exist on PATH. No secrets. |
-| `run` | `subprocess` in the workspace root. `shlex.split`, not `shell=True`. Default timeout 30s, max 120s. Redacts `github_pat_` and AWS access-key shapes in output. |
-| `record_terminal` | If `ffmpeg` is missing, error. If present, honest stub with the Linux x11grab command. Does not write a video file. |
+| `run` | `subprocess` in the workspace root. `shlex.split`, not `shell=True`. Default timeout 30s, max 120s. Nonzero exits return `ok: false`; stdout and stderr are capped at 1MB each. Timed-out process groups are terminated. Redacts `github_pat_` and AWS access-key shapes in output. |
+| `record_terminal` | Honest stub that never writes a video file. On Linux with `ffmpeg`, returns an `x11grab` command; other platforms return a clear unsupported-platform error. |
 | `write_file` | Write a path relative to the workspace. Refuses `..` and absolute paths. |
 | `read_file` | Read a path relative to the workspace. Same sandbox. 1MB limit. |
 

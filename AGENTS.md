@@ -13,7 +13,7 @@ This does not replace Grok Bot Computers or Local execution. Those are a differe
 1. Call status first. Note OS, cwd, workspace, and whether copilot, ffmpeg, and git are on PATH.
 2. Put demo scripts and output files in the workspace with write_file / read_file. Relative paths only.
 3. Use run for commands that should execute in the workspace (copilot, git, ffmpeg, compilers). Pass a real argv string. Timeouts cap at 120 seconds.
-4. record_terminal will not produce a video. If ffmpeg is missing, install it on the host. If it is present, run the suggested ffmpeg command yourself via run or tell the human. Do not fake a recording.
+4. record_terminal will not produce a video. On Linux, install ffmpeg if needed and run its suggested command yourself via run. Other platforms return an unsupported-platform error. Do not fake a recording.
 
 ## Never
 
