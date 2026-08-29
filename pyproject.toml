@@ -1,0 +1,29 @@
+[project]
+name = "machine-mcp"
+version = "0.1.0"
+description = "Laptop-side MCP server so an AI agent can use the human's own machine."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Andrea Griffiths" }]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+machine-mcp = "machine_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

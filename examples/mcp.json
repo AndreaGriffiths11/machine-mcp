@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "machine-mcp": {
+      "command": "path/to/.venv/bin/machine-mcp",
+      "args": [],
+      "env": {
+        "MACHINE_MCP_WORKSPACE": "/path/to/machine-mcp-workspace"
+      }
+    }
+  }
+}
